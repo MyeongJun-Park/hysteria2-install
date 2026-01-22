@@ -23,7 +23,7 @@ realip(){
     ip=$(curl -s4m8 ip.sb -k) || ip=$(curl -s6m8 ip.sb -k)
 }
 
-# --- 找回丢失的函数 ---
+# --- 1. 基础功能函数 (必须放在调用者之前) ---
 
 inst_cert(){
     green "Hysteria 2 协议证书申请方式如下："
@@ -38,6 +38,8 @@ inst_cert(){
         green "将使用必应自签证书"
         cert_path="/etc/hysteria/cert.crt"
         key_path="/etc/hysteria/private.key"
+        # 确保目录存在
+        mkdir -p /etc/hysteria
         openssl ecparam -genkey -name prime256v1 -out "$key_path"
         openssl req -new -x509 -days 36500 -key "$key_path" -out "$cert_path" -subj "/CN=www.bing.com"
         hy_domain="www.bing.com"
@@ -61,7 +63,7 @@ inst_site(){
     [[ -z $proxysite ]] && proxysite="en.snu.ac.kr"
 }
 
-# --- 多用户功能 ---
+# --- 2. 核心业务函数 ---
 
 adduser(){
     if [[ ! -f /etc/hysteria/config.yaml ]]; then
@@ -74,7 +76,7 @@ adduser(){
     read -p "请输入新用户密码：" newpass
     [[ -z $newpass ]] && newpass=$(date +%s%N | md5sum | cut -c 1-8)
 
-    # 转换多用户格式
+    # 转换多用户格式 (YAML 列表)
     if grep -q "password: " /etc/hysteria/config.yaml && ! grep -q "  password:$" /etc/hysteria/config.yaml; then
         oldpass=$(grep "password: " /etc/hysteria/config.yaml | awk '{print $2}' | head -n 1)
         sed -i "s/password: $oldpass/password:\n    - $oldpass/g" /etc/hysteria/config.yaml
@@ -95,18 +97,17 @@ tls:
 EOF
     echo "hysteria2://$newpass@$ip:$current_port/?insecure=1&sni=www.bing.com#$newname" > "$user_path/url.txt"
     systemctl restart hysteria-server
-    green "新用户 $newname 添加成功！路径: $user_path"
+    green "新用户 $newname 添加成功！配置已存至: $user_path"
 }
-
-# --- 安装逻辑 ---
 
 insthysteria(){
     realip
-    # 强制重新下载安装器确保环境完整
+    # 强制重新下载安装器
     wget -N https://raw.githubusercontent.com/Misaka-blog/hysteria-install/main/hy2/install_server.sh
     bash install_server.sh
     rm -f install_server.sh
 
+    # 这里的函数已经在前面定义过了，不会再报错
     inst_cert
     inst_port
     inst_pwd
@@ -142,37 +143,44 @@ EOF
     systemctl enable hysteria-server
     systemctl restart hysteria-server
     green "Hysteria 2 安装并配置完成！"
-    showconf
 }
 
 showconf(){
-    yellow "配置保存路径: $MY_PATH"
-    red "默认链接: $(cat $MY_PATH/url.txt 2>/dev/null)"
+    yellow "配置保存根路径: $MY_PATH"
+    if [[ -f $MY_PATH/url.txt ]]; then
+        red "默认连接链接: $(cat $MY_PATH/url.txt)"
+    else
+        red "尚未生成配置，请先运行安装。"
+    fi
 }
+
+# --- 3. 菜单入口 ---
 
 menu() {
     clear
     echo "#############################################################"
-    echo -e "#                  Hysteria 2 多用户版脚本                  #"
+    echo -e "#                  Hysteria 2 多用户管理脚本                #"
     echo "#############################################################"
-    echo -e " 配置文件根路径: ${YELLOW}$MY_PATH${PLAIN}"
+    echo -e " 配置文件存储位置: ${YELLOW}$MY_PATH${PLAIN}"
     echo " ------------------------------------------------------------"
-    echo -e " 1. 安装 Hysteria 2"
-    echo -e " 2. 卸载 Hysteria 2"
+    echo -e " ${GREEN}1.${PLAIN} 安装/覆盖安装 Hysteria 2"
+    echo -e " ${RED}2.${PLAIN} 彻底卸载 Hysteria 2"
     echo " ------------------------------------------------------------"
-    echo -e " 3. 重启 Hysteria 2"
-    echo -e " 4. 查看默认配置"
-    echo -e " 5. 添加新用户 (新增)"
+    echo -e " 3. 重启 Hysteria 服务"
+    echo -e " 4. 查看默认用户配置"
+    echo -e " ${GREEN}5.${PLAIN} ${GREEN}添加新用户 (多密码)${PLAIN}"
     echo " ------------------------------------------------------------"
     echo -e " 0. 退出脚本"
+    echo ""
     read -rp "请输入选项 [0-5]: " menuInput
     case $menuInput in
         1 ) insthysteria ;;
-        2 ) systemctl stop hysteria-server; rm -rf /etc/hysteria "$MY_PATH"; green "卸载成功" ;;
+        2 ) systemctl stop hysteria-server; rm -rf /etc/hysteria "$MY_PATH"; green "卸载完成" ;;
         3 ) systemctl restart hysteria-server; green "重启成功" ;;
         4 ) showconf ;;
         5 ) adduser ;;
         0 ) exit 0 ;;
+        * ) exit 1 ;;
     esac
 }
 
