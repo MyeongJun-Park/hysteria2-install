@@ -277,8 +277,8 @@ EOF
         last_ip=$ip
     fi
 
-    mkdir /root/hy
-    cat << EOF > /root/hy/hy-client.yaml
+    mkdir /home/hy2
+    cat << EOF > /home/hy2/hy-client.yaml
 server: $last_ip:$last_port
 
 auth: $auth_pwd
@@ -302,7 +302,7 @@ transport:
   udp:
     hopInterval: 30s 
 EOF
-    cat << EOF > /root/hy/hy-client.json
+    cat << EOF > /home/hy2/hy-client.json
 {
   "server": "$last_ip:$last_port",
   "auth": "$auth_pwd",
@@ -327,8 +327,8 @@ EOF
 }
 EOF
 
-    url="hysteria2://$auth_pwd@$last_ip:$last_port/?insecure=1&sni=$hy_domain#Hysteria2-misaka"
-    echo $url > /root/hy/url.txt
+    url="hysteria2://$auth_pwd@$last_ip:$last_port/?insecure=1&sni=$hy_domain#Hysteria2"
+    echo $url > /home/hy2/url.txt
 
     systemctl daemon-reload
     systemctl enable hysteria-server
@@ -340,19 +340,19 @@ EOF
     fi
     red "======================================================================================"
     green "Hysteria 2 代理服务安装完成"
-    yellow "Hysteria 2 客户端 YAML 配置文件 hy-client.yaml 内容如下，并保存到 /root/hy/hy-client.yaml"
-    red "$(cat /root/hy/hy-client.yaml)"
-    yellow "Hysteria 2 客户端 JSON 配置文件 hy-client.json 内容如下，并保存到 /root/hy/hy-client.json"
-    red "$(cat /root/hy/hy-client.json)"
-    yellow "Hysteria 2 节点分享链接如下，并保存到 /root/hy/url.txt"
-    red "$(cat /root/hy/url.txt)"
+    yellow "Hysteria 2 客户端 YAML 配置文件 hy-client.yaml 内容如下，并保存到 /home/hy2/hy-client.yaml"
+    red "$(cat /home/hy2/hy-client.yaml)"
+    yellow "Hysteria 2 客户端 JSON 配置文件 hy-client.json 内容如下，并保存到 /home/hy2/hy-client.json"
+    red "$(cat /home/hy2/hy-client.json)"
+    yellow "Hysteria 2 节点分享链接如下，并保存到 /home/hy2/url.txt"
+    red "$(cat /home/hy2/url.txt)"
 }
 
 unsthysteria(){
     systemctl stop hysteria-server.service >/dev/null 2>&1
     systemctl disable hysteria-server.service >/dev/null 2>&1
     rm -f /lib/systemd/system/hysteria-server.service /lib/systemd/system/hysteria-server@.service
-    rm -rf /usr/local/bin/hysteria /etc/hysteria /root/hy /root/hysteria.sh
+    rm -rf /usr/local/bin/hysteria /etc/hysteria /home/hy2 /home/hy2steria.sh
     iptables -t nat -F PREROUTING >/dev/null 2>&1
     netfilter-persistent save >/dev/null 2>&1
 
@@ -400,8 +400,8 @@ changeport(){
     done
 
     sed -i "1s#$oldport#$port#g" /etc/hysteria/config.yaml
-    sed -i "1s#$oldport#$port#g" /root/hy/hy-client.yaml
-    sed -i "2s#$oldport#$port#g" /root/hy/hy-client.json
+    sed -i "1s#$oldport#$port#g" /home/hy2/hy-client.yaml
+    sed -i "2s#$oldport#$port#g" /home/hy2/hy-client.json
 
     stophysteria && starthysteria
 
@@ -417,8 +417,8 @@ changepasswd(){
     [[ -z $passwd ]] && passwd=$(date +%s%N | md5sum | cut -c 1-8)
 
     sed -i "1s#$oldpasswd#$passwd#g" /etc/hysteria/config.yaml
-    sed -i "1s#$oldpasswd#$passwd#g" /root/hy/hy-client.yaml
-    sed -i "3s#$oldpasswd#$passwd#g" /root/hy/hy-client.json
+    sed -i "1s#$oldpasswd#$passwd#g" /home/hy2/hy-client.yaml
+    sed -i "3s#$oldpasswd#$passwd#g" /home/hy2/hy-client.json
 
     stophysteria && starthysteria
 
@@ -430,14 +430,14 @@ changepasswd(){
 change_cert(){
     old_cert=$(cat /etc/hysteria/config.yaml | grep cert | awk -F " " '{print $2}')
     old_key=$(cat /etc/hysteria/config.yaml | grep key | awk -F " " '{print $2}')
-    old_hydomain=$(cat /root/hy/hy-client.yaml | grep sni | awk '{print $2}')
+    old_hydomain=$(cat /home/hy2/hy-client.yaml | grep sni | awk '{print $2}')
 
     inst_cert
 
     sed -i "s!$old_cert!$cert_path!g" /etc/hysteria/config.yaml
     sed -i "s!$old_key!$key_path!g" /etc/hysteria/config.yaml
-    sed -i "6s/$old_hydomain/$hy_domain/g" /root/hy/hy-client.yaml
-    sed -i "5s/$old_hydomain/$hy_domain/g" /root/hy/hy-client.json
+    sed -i "6s/$old_hydomain/$hy_domain/g" /home/hy2/hy-client.yaml
+    sed -i "5s/$old_hydomain/$hy_domain/g" /home/hy2/hy-client.json
 
     stophysteria && starthysteria
 
@@ -476,12 +476,12 @@ changeconf(){
 }
 
 showconf(){
-    yellow "Hysteria 2 客户端 YAML 配置文件 hy-client.yaml 内容如下，并保存到 /root/hy/hy-client.yaml"
-    red "$(cat /root/hy/hy-client.yaml)"
-    yellow "Hysteria 2 客户端 JSON 配置文件 hy-client.json 内容如下，并保存到 /root/hy/hy-client.json"
-    red "$(cat /root/hy/hy-client.json)"
-    yellow "Hysteria 2 节点分享链接如下，并保存到 /root/hy/url.txt"
-    red "$(cat /root/hy/url.txt)"
+    yellow "Hysteria 2 客户端 YAML 配置文件 hy-client.yaml 内容如下，并保存到 /home/hy2/hy-client.yaml"
+    red "$(cat /home/hy2/hy-client.yaml)"
+    yellow "Hysteria 2 客户端 JSON 配置文件 hy-client.json 内容如下，并保存到 /home/hy2/hy-client.json"
+    red "$(cat /home/hy2/hy-client.json)"
+    yellow "Hysteria 2 节点分享链接如下，并保存到 /home/hy2/url.txt"
+    red "$(cat /home/hy2/url.txt)"
 }
 
 menu() {
