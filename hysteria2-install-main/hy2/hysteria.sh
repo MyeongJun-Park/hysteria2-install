@@ -1,11 +1,10 @@
 #!/bin/bash
 # =========================================================
-#                Hysteria 2 一键安装脚本（增强版）
-#  - 保留你原有逻辑
-#  - 修复：PACKAGE_UPDATE / INSTALL 数组索引调用错误
-#  - 新增：菜单 6 新增用户（多用户 userpass）
-#  - 安装时默认使用 userpass（admin: 密码）
-#  - 自动为每个用户生成独立配置：/root/hy/users/<user>/
+# Hysteria 2 一键安装脚本（最终版 v2 - 多用户安全版）
+# 1) 安装默认 userpass：admin
+# 2) 菜单6 新增用户（生成 /root/hy/users/<user>/）
+# 3) 自动修复证书/私钥权限（适配 systemd User=hysteria）
+# 4) 新增用户重启失败自动回滚配置
 # =========================================================
 
 export LANG=en_US.UTF-8
@@ -58,6 +57,38 @@ realip(){
     ip=$(curl -s4m8 ip.sb -k) || ip=$(curl -s6m8 ip.sb -k)
 }
 
+# ================================
+# 修复 TLS 证书权限（关键：适配 systemd User=hysteria）
+# ================================
+fix_tls_perm() {
+    local cfg="/etc/hysteria/config.yaml"
+    [[ ! -f "$cfg" ]] && return 0
+
+    local cert key dir
+    cert=$(awk '/^[[:space:]]*cert:/{print $2; exit}' "$cfg")
+    key=$(awk '/^[[:space:]]*key:/{print $2; exit}' "$cfg")
+    [[ -z "$cert" || -z "$key" ]] && return 0
+    [[ ! -f "$cert" || ! -f "$key" ]] && return 0
+
+    dir="$(dirname "$cert")"
+
+    # 如果存在 hysteria 用户，则按 hysteria 用户运行的服务权限设置
+    if id hysteria >/dev/null 2>&1; then
+        chown -R root:hysteria "$dir" 2>/dev/null
+        chmod 750 "$dir" 2>/dev/null
+
+        chown root:hysteria "$cert" "$key" 2>/dev/null
+        chmod 644 "$cert" 2>/dev/null
+        chmod 640 "$key" 2>/dev/null
+    else
+        # 兜底：root 跑
+        chown root:root "$cert" "$key" 2>/dev/null
+        chmod 644 "$cert" 2>/dev/null
+        chmod 600 "$key" 2>/dev/null
+        chmod 755 "$dir" 2>/dev/null
+    fi
+}
+
 inst_cert(){
     green "Hysteria 2 协议证书申请方式如下："
     echo ""
@@ -70,8 +101,7 @@ inst_cert(){
     if [[ $certInput == 2 ]]; then
         cert_path="/root/cert.crt"
         key_path="/root/private.key"
-
-        chmod a+x /root 2>/dev/null # 让 Hysteria 主程序访问到 /root 目录（部分系统可能不允许 a+x）
+        chmod a+x /root 2>/dev/null
 
         if [[ -f /root/cert.crt && -f /root/private.key ]] && [[ -s /root/cert.crt && -s /root/private.key ]] && [[ -f /root/ca.log ]]; then
             domain=$(cat /root/ca.log)
@@ -126,36 +156,26 @@ inst_cert(){
                     echo $domain > /root/ca.log
                     sed -i '/--cron/d' /etc/crontab >/dev/null 2>&1
                     echo "0 0 * * * root bash /root/.acme.sh/acme.sh --cron -f >/dev/null 2>&1" >> /etc/crontab
-
                     green "证书申请成功! cert.crt 与 private.key 已保存到 /root/"
-                    yellow "证书crt文件路径: /root/cert.crt"
-                    yellow "私钥key文件路径: /root/private.key"
                     hy_domain=$domain
                 else
-                    red "证书申请似乎失败了：未找到有效的 cert/key"
+                    red "证书申请失败：未找到有效的 cert/key"
                     exit 1
                 fi
             else
                 red "当前域名解析的IP与当前VPS使用的真实IP不匹配"
-                green "建议如下："
-                yellow "1. 请确保CloudFlare小云朵为关闭状态(仅限DNS), 其他域名解析或CDN网站设置同理"
-                yellow "2. 请检查DNS解析设置的IP是否为VPS的真实IP"
-                yellow "3. 建议截图发布到 Issues/论坛/TG群询问"
+                yellow "请确保 DNS 解析到真实 IP（关闭 Cloudflare 代理小云朵）"
                 exit 1
             fi
         fi
 
     elif [[ $certInput == 3 ]]; then
         read -p "请输入公钥文件 crt 的路径：" cert_path
-        yellow "公钥文件 crt 的路径：$cert_path "
         read -p "请输入密钥文件 key 的路径：" key_path
-        yellow "密钥文件 key 的路径：$key_path "
         read -p "请输入证书的域名：" domain
-        yellow "证书域名：$domain"
         hy_domain=$domain
     else
         green "将使用必应自签证书作为 Hysteria 2 的节点证书"
-
         cert_path="/etc/hysteria/cert.crt"
         key_path="/etc/hysteria/private.key"
         mkdir -p /etc/hysteria
@@ -163,7 +183,9 @@ inst_cert(){
         openssl ecparam -genkey -name prime256v1 -out /etc/hysteria/private.key
         openssl req -new -x509 -days 36500 -key /etc/hysteria/private.key -out /etc/hysteria/cert.crt -subj "/CN=www.bing.com"
 
-        chmod 600 /etc/hysteria/cert.crt /etc/hysteria/private.key
+        # 注意：最终权限由 fix_tls_perm 统一修
+        chmod 600 /etc/hysteria/private.key
+        chmod 644 /etc/hysteria/cert.crt
 
         hy_domain="www.bing.com"
         domain="www.bing.com"
@@ -180,30 +202,25 @@ inst_jump(){
     if [[ $jumpInput == 2 ]]; then
         read -p "设置范围端口的起始端口 (建议10000-65535之间)：" firstport
         read -p "设置一个范围端口的末尾端口 (建议10000-65535之间，一定要比上面起始端口大)：" endport
-
         if [[ -z "$firstport" || -z "$endport" ]]; then
-            red "端口范围不能为空，已取消端口跳跃"
-            firstport=""
-            endport=""
+            yellow "端口范围为空，取消端口跳跃"
+            firstport=""; endport=""
             return 0
         fi
-
         if [[ $firstport -ge $endport ]]; then
             until [[ $firstport -lt $endport ]]; do
-                red "你设置的起始端口必须小于末尾端口，请重新输入"
+                red "起始端口必须小于末尾端口，请重新输入"
                 read -p "起始端口：" firstport
                 read -p "末尾端口：" endport
             done
         fi
-
         iptables -t nat -A PREROUTING -p udp --dport $firstport:$endport -j DNAT --to-destination :$port
         ip6tables -t nat -A PREROUTING -p udp --dport $firstport:$endport -j DNAT --to-destination :$port 2>/dev/null
         netfilter-persistent save >/dev/null 2>&1
         green "已启用端口跳跃：${firstport}-${endport} -> ${port}"
     else
         yellow "将继续使用单端口模式"
-        firstport=""
-        endport=""
+        firstport=""; endport=""
     fi
 }
 
@@ -225,36 +242,33 @@ inst_port(){
 
 inst_pwd(){
     read -p "设置 Hysteria 2 密码（回车跳过为随机字符）：" auth_pwd
-    [[ -z $auth_pwd ]] && auth_pwd=$(date +%s%N | md5sum | cut -c 1-8)
-    yellow "使用在 Hysteria 2 节点的密码为：$auth_pwd"
+    [[ -z $auth_pwd ]] && auth_pwd=$(date +%s%N | md5sum | cut -c 1-10)
+    yellow "默认用户 admin 的密码为：$auth_pwd"
 }
 
 inst_site(){
-    read -rp "请输入 Hysteria 2 的伪装网站地址 （去除https://） [默认首尔大学]：" proxysite
+    read -rp "请输入 Hysteria 2 的伪装网站地址（去除https://） [默认首尔大学]：" proxysite
     [[ -z $proxysite ]] && proxysite="en.snu.ac.kr"
     yellow "使用在 Hysteria 2 节点的伪装网站为：$proxysite"
 }
 
 # ================================
-# 多用户：确保 userpass 模式
+# 多用户：确保 userpass 模式（若是 password 自动迁移）
 # ================================
 ensure_userpass_mode() {
     local cfg="/etc/hysteria/config.yaml"
     [[ ! -f "$cfg" ]] && red "未发现 $cfg，先安装 Hysteria 2" && return 1
 
-    # 已是 userpass
     if grep -qE '^[[:space:]]*type:[[:space:]]*userpass' "$cfg"; then
         return 0
     fi
 
-    # 从 password 模式迁移到 userpass（把原 password 变成 admin 用户密码）
     if grep -qE '^[[:space:]]*type:[[:space:]]*password' "$cfg"; then
         local oldpass
         oldpass=$(awk '
             $0 ~ /^auth:/ {in_auth=1}
             in_auth && $0 ~ /^[[:space:]]*password:/ {print $2; exit}
         ' "$cfg")
-
         [[ -z "$oldpass" ]] && red "迁移失败：没读到旧 password" && return 1
 
         cp -a "$cfg" "${cfg}.bak.$(date +%F_%H%M%S)"
@@ -265,7 +279,7 @@ ensure_userpass_mode() {
                 print "auth:"
                 print "  type: userpass"
                 print "  userpass:"
-                print "    admin: " p
+                print "    admin: \"" p "\""
                 skip=1
                 next
             }
@@ -274,7 +288,7 @@ ensure_userpass_mode() {
             {print}
         ' "$cfg" > "${cfg}.tmp" && mv "${cfg}.tmp" "$cfg"
 
-        green "已将 auth 从 password 自动迁移为 userpass（原密码 -> admin 用户）"
+        green "已将 auth 从 password 迁移为 userpass（原密码 -> admin）"
         return 0
     fi
 
@@ -283,16 +297,14 @@ ensure_userpass_mode() {
 }
 
 # ================================
-# 菜单6：新增用户（写入 userpass + 生成该用户客户端文件）
+# 菜单6：新增用户（安全版：失败回滚 + 自动修TLS权限）
 # ================================
 adduser() {
     local cfg="/etc/hysteria/config.yaml"
-    local base="/root/hy"
     local outdir="/root/hy/users"
 
     ensure_userpass_mode || return 1
-
-    mkdir -p "$outdir" "$base"
+    mkdir -p "$outdir"
 
     read -rp "输入新用户名（建议字母/数字/_/-，1-32位）：" hy_user
     [[ -z "$hy_user" ]] && red "用户名不能为空" && return 1
@@ -301,7 +313,6 @@ adduser() {
         return 1
     fi
 
-    # 查重：4空格 username:
     if grep -qE "^[[:space:]]{4}${hy_user}:" "$cfg"; then
         red "该用户已存在：$hy_user"
         return 1
@@ -310,47 +321,48 @@ adduser() {
     read -rp "设置该用户密码（回车随机）：" hy_pass
     [[ -z "$hy_pass" ]] && hy_pass=$(date +%s%N | md5sum | cut -c 1-10)
 
-    cp -a "$cfg" "${cfg}.bak.$(date +%F_%H%M%S)"
+    # 备份配置，便于失败回滚
+    local bak="${cfg}.bak.$(date +%F_%H%M%S)"
+    cp -a "$cfg" "$bak" || { red "备份失败：$bak"; return 1; }
 
-    # 插入到 userpass: 下一行
+    # 写入用户（密码加引号，避免特殊字符炸 YAML）
     awk -v u="$hy_user" -v p="$hy_pass" '
         {print}
         /^[[:space:]]*userpass:[[:space:]]*$/{
-            print "    " u ": " p
+            print "    " u ": \"" p "\""
         }
     ' "$cfg" > "${cfg}.tmp" && mv "${cfg}.tmp" "$cfg"
 
+    # 自动修 TLS 权限，避免 systemd User=hysteria 读取失败
+    fix_tls_perm
+
+    # 重启服务
     systemctl restart hysteria-server >/dev/null 2>&1
     if ! systemctl is-active --quiet hysteria-server; then
-        red "新增用户后服务启动失败！请查看：systemctl status hysteria-server"
+        red "新增用户后服务启动失败！正在自动回滚配置..."
+        cp -a "$bak" "$cfg"
+        fix_tls_perm
+        systemctl restart hysteria-server >/dev/null 2>&1
+        systemctl status hysteria-server --no-pager -l
         return 1
     fi
 
-    # 获取 listen 端口
-    local port_now
+    # 生成用户文件
+    local port_now sni_now ip2 last_ip user_auth user_dir
     port_now=$(awk -F: '/^listen:/{gsub(/ /,"",$0); print $3; exit}' "$cfg")
-    [[ -z "$port_now" ]] && port_now="$port"
+    [[ -z "$port_now" ]] && port_now="24443"
 
-    # 获取公网 IP
-    realip
-    local last_ip
-    if [[ -n $(echo "$ip" | grep ":") ]]; then
-        last_ip="[$ip]"
-    else
-        last_ip="$ip"
-    fi
+    ip2=$(curl -s4m8 ip.sb -k || curl -s6m8 ip.sb -k)
+    if echo "$ip2" | grep -q ":"; then last_ip="[$ip2]"; else last_ip="$ip2"; fi
 
-    # 获取 SNI（优先从现有 hy-client.yaml 读取）
-    local sni_now
     sni_now=$(awk '/^[[:space:]]*sni:/{print $2; exit}' /root/hy/hy-client.yaml 2>/dev/null)
-    [[ -z "$sni_now" ]] && sni_now="$hy_domain"
     [[ -z "$sni_now" ]] && sni_now="www.bing.com"
 
-    local user_auth="${hy_user}:${hy_pass}"
-    local user_dir="${outdir}/${hy_user}"
+    user_auth="${hy_user}:${hy_pass}"
+    user_dir="${outdir}/${hy_user}"
     mkdir -p "$user_dir"
 
-    cat > "${user_dir}/hy-client.yaml" << EOF
+    cat > "${user_dir}/hy-client.yaml" <<EOF
 server: ${last_ip}:${port_now}
 
 auth: ${user_auth}
@@ -375,7 +387,7 @@ transport:
     hopInterval: 30s
 EOF
 
-    cat > "${user_dir}/hy-client.json" << EOF
+    cat > "${user_dir}/hy-client.json" <<EOF
 {
   "server": "${last_ip}:${port_now}",
   "auth": "${user_auth}",
@@ -400,14 +412,10 @@ EOF
 }
 EOF
 
-    local url="hysteria2://${user_auth}@${last_ip}:${port_now}/?insecure=1&sni=${sni_now}#Hy2-${hy_user}"
-    echo "$url" > "${user_dir}/url.txt"
+    echo "hysteria2://${user_auth}@${last_ip}:${port_now}/?insecure=1&sni=${sni_now}#Hy2-${hy_user}" > "${user_dir}/url.txt"
 
     green "用户新增成功：$hy_user"
-    yellow "该用户配置已生成："
-    yellow "  ${user_dir}/hy-client.yaml"
-    yellow "  ${user_dir}/hy-client.json"
-    yellow "  ${user_dir}/url.txt"
+    yellow "已生成：${user_dir}/"
     red "分享链接：$(cat ${user_dir}/url.txt)"
 }
 
@@ -433,22 +441,15 @@ insthysteria(){
     bash install_server.sh
     rm -f install_server.sh
 
-    if [[ -f "/usr/local/bin/hysteria" ]]; then
-        green "Hysteria 2 安装成功！"
-    else
-        red "Hysteria 2 安装失败！"
-        exit 1
-    fi
+    [[ -f "/usr/local/bin/hysteria" ]] && green "Hysteria 2 安装成功！" || { red "Hysteria 2 安装失败！"; exit 1; }
 
-    # 询问用户 Hysteria 配置
     inst_cert
     inst_port
     inst_pwd
     inst_site
 
-    mkdir -p /etc/hysteria
+    mkdir -p /etc/hysteria /root/hy
 
-    # 设置 Hysteria 配置文件（默认启用多用户 userpass：admin）
     cat << EOF > /etc/hysteria/config.yaml
 listen: :$port
 
@@ -465,7 +466,7 @@ quic:
 auth:
   type: userpass
   userpass:
-    admin: $auth_pwd
+    admin: "$auth_pwd"
 
 masquerade:
   type: proxy
@@ -474,23 +475,19 @@ masquerade:
     rewriteHost: true
 EOF
 
-    # 最终入站端口范围（用于生成分享链接显示）
+    # 端口展示：若开启跳跃，链接里显示 24443,10000-20000
     if [[ -n $firstport ]]; then
         last_port="$port,$firstport-$endport"
     else
-        last_port=$port
+        last_port="$port"
     fi
 
-    # 给 IPv6 地址加中括号
     if [[ -n $(echo $ip | grep ":") ]]; then
         last_ip="[$ip]"
     else
-        last_ip=$ip
+        last_ip="$ip"
     fi
 
-    mkdir -p /root/hy
-
-    # 生成 admin 的客户端配置（userpass：auth=admin:password）
     cat << EOF > /root/hy/hy-client.yaml
 server: $last_ip:$last_port
 
@@ -541,45 +538,44 @@ EOF
 }
 EOF
 
-    url="hysteria2://admin:$auth_pwd@$last_ip:$last_port/?insecure=1&sni=$hy_domain#Hysteria2-admin"
-    echo $url > /root/hy/url.txt
+    echo "hysteria2://admin:$auth_pwd@$last_ip:$last_port/?insecure=1&sni=$hy_domain#Hysteria2-admin" > /root/hy/url.txt
+
+    # 关键：启动前修复证书权限（适配 User=hysteria）
+    fix_tls_perm
 
     systemctl daemon-reload
     systemctl enable hysteria-server >/dev/null 2>&1
-    systemctl start hysteria-server
+    systemctl restart hysteria-server
 
-    if systemctl is-active --quiet hysteria-server && [[ -f '/etc/hysteria/config.yaml' ]]; then
+    if systemctl is-active --quiet hysteria-server; then
         green "Hysteria 2 服务启动成功"
     else
-        red "Hysteria 2 服务启动失败，请运行 systemctl status hysteria-server 查看服务状态并反馈，脚本退出"
+        red "Hysteria 2 服务启动失败："
+        systemctl status hysteria-server --no-pager -l
         exit 1
     fi
 
     red "======================================================================================"
-    green "Hysteria 2 代理服务安装完成（多用户模式 userpass）"
+    green "Hysteria 2 代理服务安装完成（多用户 userpass）"
     yellow "默认用户：admin"
-    yellow "Hysteria 2 客户端 YAML 配置文件 hy-client.yaml 内容如下，并保存到 /root/hy/hy-client.yaml"
-    red "$(cat /root/hy/hy-client.yaml)"
-    yellow "Hysteria 2 客户端 JSON 配置文件 hy-client.json 内容如下，并保存到 /root/hy/hy-client.json"
-    red "$(cat /root/hy/hy-client.json)"
-    yellow "Hysteria 2 节点分享链接如下，并保存到 /root/hy/url.txt"
+    yellow "YAML：/root/hy/hy-client.yaml"
+    yellow "JSON：/root/hy/hy-client.json"
+    yellow "URL ：/root/hy/url.txt"
     red "$(cat /root/hy/url.txt)"
 }
 
 unsthysteria(){
     systemctl stop hysteria-server.service >/dev/null 2>&1
     systemctl disable hysteria-server.service >/dev/null 2>&1
-
     rm -f /lib/systemd/system/hysteria-server.service /lib/systemd/system/hysteria-server@.service
     rm -rf /usr/local/bin/hysteria /etc/hysteria /root/hy /root/hysteria.sh
-
     iptables -t nat -F PREROUTING >/dev/null 2>&1
     netfilter-persistent save >/dev/null 2>&1
-
     green "Hysteria 2 已彻底卸载完成！"
 }
 
 starthysteria(){
+    fix_tls_perm
     systemctl start hysteria-server
     systemctl enable hysteria-server >/dev/null 2>&1
     green "已启动 Hysteria 2"
@@ -608,7 +604,7 @@ hysteriaswitch(){
 }
 
 changeport(){
-    oldport=$(cat /etc/hysteria/config.yaml 2>/dev/null | sed -n 1p | awk '{print $2}' | awk -F ":" '{print $2}')
+    oldport=$(awk -F: '/^listen:/{gsub(/ /,"",$0); print $3; exit}' /etc/hysteria/config.yaml 2>/dev/null)
 
     read -p "设置 Hysteria 2 端口[1-65535]（回车则随机分配端口）：" port
     [[ -z $port ]] && port=$(shuf -i 2000-65535 -n 1)
@@ -619,19 +615,14 @@ changeport(){
         [[ -z $port ]] && port=$(shuf -i 2000-65535 -n 1)
     done
 
-    sed -i "1s#$oldport#$port#g" /etc/hysteria/config.yaml
-    sed -i "s#:${oldport}#:${port}#g" /root/hy/hy-client.yaml 2>/dev/null
-    sed -i "s#:${oldport}#:${port}#g" /root/hy/hy-client.json 2>/dev/null
+    # 替换 listen 行的端口
+    sed -i "s/^listen: :${oldport}$/listen: :${port}/" /etc/hysteria/config.yaml
 
     stophysteria && starthysteria
-
     green "Hysteria 2 端口已成功修改为：$port"
-    yellow "请手动更新客户端配置文件以使用节点"
-    showconf
 }
 
 changepasswd(){
-    # 兼容 userpass：默认改 admin 的密码；若你想改其他用户，用“新增用户”再自行修改 yaml
     ensure_userpass_mode || return 1
 
     oldpasswd=$(awk '
@@ -644,59 +635,31 @@ changepasswd(){
 
     cp -a /etc/hysteria/config.yaml "/etc/hysteria/config.yaml.bak.$(date +%F_%H%M%S)"
 
-    # 替换 admin 密码
     awk -v p="$passwd" '
-        /^[[:space:]]{4}admin:/ {$2=p; print; next}
+        /^[[:space:]]{4}admin:/ {$2="\""p"\""; print; next}
         {print}
     ' /etc/hysteria/config.yaml > /etc/hysteria/config.yaml.tmp && mv /etc/hysteria/config.yaml.tmp /etc/hysteria/config.yaml
 
-    # 同步更新默认输出的 /root/hy/hy-client.*（admin）
-    sed -i "s#auth: admin:${oldpasswd}#auth: admin:${passwd}#g" /root/hy/hy-client.yaml 2>/dev/null
-    sed -i "s#\"auth\": \"admin:${oldpasswd}\"#\"auth\": \"admin:${passwd}\"#g" /root/hy/hy-client.json 2>/dev/null
-    sed -i "s#hysteria2://admin:${oldpasswd}@#hysteria2://admin:${passwd}@#g" /root/hy/url.txt 2>/dev/null
-
     stophysteria && starthysteria
-
     green "admin 用户密码已成功修改"
-    yellow "请手动更新客户端配置文件以使用节点"
-    showconf
 }
 
 change_cert(){
-    old_cert=$(cat /etc/hysteria/config.yaml | grep -E '^[[:space:]]*cert:' | awk -F " " '{print $2}')
-    old_key=$(cat /etc/hysteria/config.yaml | grep -E '^[[:space:]]*key:' | awk -F " " '{print $2}')
-    old_hydomain=$(cat /root/hy/hy-client.yaml 2>/dev/null | grep sni | awk '{print $2}')
-
     inst_cert
+    # 替换 config.yaml 中 cert/key
+    sed -i "s|^[[:space:]]*cert:.*$|  cert: $cert_path|" /etc/hysteria/config.yaml
+    sed -i "s|^[[:space:]]*key:.*$|  key: $key_path|" /etc/hysteria/config.yaml
 
-    sed -i "s!$old_cert!$cert_path!g" /etc/hysteria/config.yaml
-    sed -i "s!$old_key!$key_path!g" /etc/hysteria/config.yaml
-    [[ -n "$old_hydomain" ]] && sed -i "s/$old_hydomain/$hy_domain/g" /root/hy/hy-client.yaml 2>/dev/null
-    [[ -n "$old_hydomain" ]] && sed -i "s/$old_hydomain/$hy_domain/g" /root/hy/hy-client.json 2>/dev/null
-
+    fix_tls_perm
     stophysteria && starthysteria
-
-    green "Hysteria 2 节点证书类型已成功修改"
-    yellow "请手动更新客户端配置文件以使用节点"
-    showconf
+    green "证书已修改并生效"
 }
 
 changeproxysite(){
-    oldproxysite=$(cat /etc/hysteria/config.yaml | grep url | awk -F " " '{print $2}' | awk -F "https://" '{print $2}')
-
     inst_site
-
-    # 你的原脚本这里改的是 /etc/caddy/Caddyfile，但你当前方案未必有 caddy
-    if [[ -f /etc/caddy/Caddyfile ]]; then
-        sed -i "s#$oldproxysite#$proxysite#g" /etc/caddy/Caddyfile
-        green "已同步修改 /etc/caddy/Caddyfile"
-    fi
-
-    # 修改 /etc/hysteria/config.yaml 的伪装网站（更靠谱）
-    sed -i "s#https://$oldproxysite#https://$proxysite#g" /etc/hysteria/config.yaml
-
+    sed -i "s|^[[:space:]]*url: https://.*$|    url: https://$proxysite|" /etc/hysteria/config.yaml
     stophysteria && starthysteria
-    green "Hysteria 2 节点伪装网站已成功修改为：$proxysite"
+    green "伪装网站已修改并生效"
 }
 
 changeconf(){
@@ -717,13 +680,14 @@ changeconf(){
 }
 
 showconf(){
-    yellow "Hysteria 2 客户端 YAML 配置文件 hy-client.yaml 内容如下，并保存到 /root/hy/hy-client.yaml"
-    red "$(cat /root/hy/hy-client.yaml 2>/dev/null)"
-    yellow "Hysteria 2 客户端 JSON 配置文件 hy-client.json 内容如下，并保存到 /root/hy/hy-client.json"
-    red "$(cat /root/hy/hy-client.json 2>/dev/null)"
-    yellow "Hysteria 2 节点分享链接如下，并保存到 /root/hy/url.txt"
+    yellow "默认 admin 配置：/root/hy/"
+    yellow "YAML: /root/hy/hy-client.yaml"
+    yellow "JSON: /root/hy/hy-client.json"
+    yellow "URL : /root/hy/url.txt"
     red "$(cat /root/hy/url.txt 2>/dev/null)"
-    yellow "（多用户新增用户目录：/root/hy/users/）"
+    echo ""
+    yellow "多用户目录：/root/hy/users/"
+    ls -1 /root/hy/users 2>/dev/null | sed 's/^/ - /'
 }
 
 menu() {
